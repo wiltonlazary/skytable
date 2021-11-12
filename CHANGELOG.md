@@ -4,10 +4,17 @@ All changes in this project will be noted in this file.
 
 ## Unreleased
 
+### Additions
+
+- Pipelined queries are now supported
+
 ### Improvements
 
-- `skysh` now handles special character strings more reliably
-- `skysh` now supports splitting a command across multiple lines
+- `skysh`:
+  - handles special character strings more reliably
+  - now supports splitting a command across multiple lines
+  - now supports multi-line pastes
+  - now supports comments (beginning with `#`)
 
 ## Version 0.7.1
 

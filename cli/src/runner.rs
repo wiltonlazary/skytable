@@ -25,160 +25,78 @@
 */
 use crate::tokenizer;
 use core::fmt;
-use core::future::Future;
-use core::pin::Pin;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use skytable::error::Error;
 use skytable::types::Array;
 use skytable::types::FlatElement;
+use skytable::Pipeline;
 use skytable::Query;
 use skytable::{aio, Element, RespCode};
 
-pub struct Runner<T: AsyncSocket> {
-    con: T,
+type SkyResult<T> = Result<T, Error>;
+
+pub enum Runner {
+    Insecure(aio::Connection),
+    Secure(aio::TlsConnection),
 }
 
-pub trait AsyncSocket {
-    fn run_simple_query<'s>(
-        &'s mut self,
-        query: Query,
-    ) -> Pin<Box<dyn Future<Output = Result<Element, Error>> + Send + Sync + 's>>;
-}
-
-impl AsyncSocket for aio::Connection {
-    fn run_simple_query<'s>(
-        &'s mut self,
-        query: Query,
-    ) -> Pin<Box<dyn Future<Output = Result<Element, Error>> + Send + Sync + 's>> {
-        Box::pin(async move { self.run_simple_query(&query).await })
+impl Runner {
+    pub async fn new_insecure(host: &str, port: u16) -> SkyResult<Self> {
+        let con = aio::Connection::new(host, port).await?;
+        Ok(Self::Insecure(con))
     }
-}
-
-impl AsyncSocket for aio::TlsConnection {
-    fn run_simple_query<'s>(
-        &'s mut self,
-        query: Query,
-    ) -> Pin<Box<dyn Future<Output = Result<Element, Error>> + Send + Sync + 's>> {
-        Box::pin(async move { self.run_simple_query(&query).await })
+    pub async fn new_secure(host: &str, port: u16, cert: &str) -> SkyResult<Self> {
+        let con = aio::TlsConnection::new(host, port, cert).await?;
+        Ok(Self::Secure(con))
     }
-}
-
-macro_rules! write_str {
-    ($st:ident) => {
-        println!("\"{}\"", $st)
-    };
-    ($idx:ident, $st:ident) => {
-        println!("({}) \"{}\"", $idx, $st)
-    };
-}
-
-macro_rules! write_binstr {
-    ($st:ident) => {
-        println!("{}", BinaryData($st));
-    };
-    ($idx:ident, $st:ident) => {
-        println!("({}) {}", $idx, BinaryData($st));
-    };
-}
-
-macro_rules! write_int {
-    ($int:ident) => {
-        println!("{}", $int)
-    };
-    ($idx:ident, $st:ident) => {
-        println!("({}) \"{}\"", $idx, $st)
-    };
-}
-
-macro_rules! write_err {
-    ($idx:expr, $err:ident) => {
-        err!(if let Some(idx) = $idx {
-            format!("({}) ({})\n", idx, $err)
-        } else {
-            format!("({})\n", $err)
-        })
-    };
-    ($idx:ident, $err:literal) => {
-        err!(
-            (if let Some(idx) = $idx {
-                format!("({}) ({})\n", idx, $err)
-            } else {
-                format!("({})\n", $err)
-            })
-        )
-    };
-}
-
-macro_rules! write_okay {
-    () => {
-        crossterm::execute!(
-            std::io::stdout(),
-            SetForegroundColor(Color::Cyan),
-            Print("(Okay)\n".to_string()),
-            ResetColor
-        )
-        .expect("Failed to write to stdout")
-    };
-    ($idx:ident) => {
-        crossterm::execute!(
-            std::io::stdout(),
-            SetForegroundColor(Color::Cyan),
-            Print(format!("({}) (Okay)\n", $idx)),
-            ResetColor
-        )
-        .expect("Failed to write to stdout")
-    };
-}
-
-macro_rules! err {
-    ($input:expr) => {
-        crossterm::execute!(
-            std::io::stdout(),
-            SetForegroundColor(Color::Red),
-            Print($input),
-            ResetColor
-        )
-        .expect("Failed to write to stdout")
-    };
-}
-
-macro_rules! eskysh {
-    ($e:expr) => {
-        eprintln!("[SKYSH ERROR] {}", $e)
-    };
-}
-
-impl<T: AsyncSocket> Runner<T> {
-    pub fn new(con: T) -> Self {
-        Runner { con }
+    pub async fn run_pipeline(&mut self, pipeline: Pipeline) {
+        let ret = match self {
+            Self::Insecure(con) => con.run_pipeline(pipeline).await,
+            Self::Secure(con) => con.run_pipeline(pipeline).await,
+        };
+        let retok = match ret {
+            Ok(r) => r,
+            Err(e) => fatal!("An I/O error occurred while querying: {}", e),
+        };
+        for (idx, resp) in retok
+            .into_iter()
+            .enumerate()
+            .map(|(idx, resp)| (idx + 1, resp))
+        {
+            println!("[Response {}]", idx);
+            print_element(resp);
+        }
     }
-    pub async fn run_query(&mut self, unescaped_items: &str) {
-        let query: Query = match tokenizer::get_query(unescaped_items.as_bytes()) {
+    pub async fn run_query(&mut self, unescaped: &str) {
+        let query: Query = match tokenizer::get_query(unescaped.as_bytes()) {
             Ok(q) => q,
             Err(e) => {
                 err!(format!("[Syntax Error: {}]\n", e));
                 return;
             }
         };
-        match self.con.run_simple_query(query).await {
-            Ok(resp) => match resp {
-                Element::String(st) => write_str!(st),
-                Element::Binstr(st) => {
-                    write_binstr!(st);
-                }
-                Element::Array(Array::Bin(brr)) => print_bin_array(brr),
-                Element::Array(Array::Str(srr)) => print_str_array(srr),
-                Element::RespCode(r) => print_rcode(r, None),
-                Element::UnsignedInt(int) => write_int!(int),
-                Element::Array(Array::Flat(frr)) => write_flat_array(frr),
-                Element::Array(Array::Recursive(a)) => print_array(a),
-                _ => eskysh!("The server possibly sent a newer data type that we can't parse"),
-            },
-            Err(e) => {
-                eprintln!("An I/O error occurred while querying: {}", e);
-                std::process::exit(1);
-            }
+        let ret = match self {
+            Self::Insecure(con) => con.run_simple_query(&query).await,
+            Self::Secure(con) => con.run_simple_query(&query).await,
+        };
+        match ret {
+            Ok(resp) => print_element(resp),
+            Err(e) => fatal!("An I/O error occurred while querying: {}", e),
         }
+    }
+}
+
+fn print_element(el: Element) {
+    match el {
+        Element::String(st) => write_str!(st),
+        Element::Binstr(st) => write_binstr!(st),
+        Element::Array(Array::Bin(brr)) => print_bin_array(brr),
+        Element::Array(Array::Str(srr)) => print_str_array(srr),
+        Element::RespCode(r) => print_rcode(r, None),
+        Element::UnsignedInt(int) => write_int!(int),
+        Element::Array(Array::Flat(frr)) => write_flat_array(frr),
+        Element::Array(Array::Recursive(a)) => print_array(a),
+        _ => eskysh!("The server possibly sent a newer data type that we can't parse"),
     }
 }
 

@@ -26,6 +26,7 @@
 
 #![deny(unused_crate_dependencies)]
 #![deny(unused_imports)]
+#![cfg_attr(feature = "nightly", feature(test))]
 
 //! # Skytable
 //!
@@ -45,7 +46,7 @@ use std::thread;
 use std::time;
 #[macro_use]
 mod util;
-#[macro_use] // HACK(@ohsayan): macro_use will only work with extern crate for some moon reasons
+#[macro_use]
 extern crate libsky;
 mod actions;
 mod admin;
